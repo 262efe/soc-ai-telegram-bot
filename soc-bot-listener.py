@@ -356,7 +356,8 @@ def cmd_analyze(token, chat_id):
         import os
         script_path = "/usr/local/bin/soc-log-analyzer.sh"
         if not os.path.exists(script_path):
-            script_path = "./soc-log-analyzer.sh"
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            script_path = os.path.join(base_dir, "soc-log-analyzer.sh")
 
         result = subprocess.run(
             [script_path],
