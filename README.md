@@ -53,6 +53,9 @@ This repository contains a comprehensive, automated Security Operations Center (
    sudo ./install.sh
 ```
 
+![SOC Installation](assets/terminal_screenshot.png)
+
+
 ## Key Files & Structure
 
 - `soc-log-analyzer.sh`: Uses AI (Groq API) to read Nginx and kernel logs and generates a human-readable threat intelligence report.
@@ -201,6 +204,9 @@ Bu depo, sunucu etkinliklerini izlemek, kötü niyetli girişimleri gerçek zama
    chmod +x install.sh
    sudo ./install.sh
 ```
+
+![SOC Kurulumu](assets/terminal_screenshot.png)
+
 
 ## Önemli Dosyalar ve Yapı
 
