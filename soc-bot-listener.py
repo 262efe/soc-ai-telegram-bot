@@ -7,10 +7,11 @@ import time
 import re
 from datetime import datetime, timedelta
 
-from soc_config import load_soc_config
+from soc_config import load_soc_config, CLOUDFLARE_PREFIXES
 
 config = load_soc_config()
 DB_PATH = config.get("DB_PATH", "/var/lib/soc/soc_logs.db")
+SERVER_IP = config.get("SERVER_IP", "")
 
 ALLOWED_BINARIES = [
     "/usr/local/bin/nginx-ban-ip.sh",
@@ -33,10 +34,9 @@ ALLOWED_BINARIES = [
     "/usr/bin/apt",
 ]
 
-# TR: Komut bazlı hız sınırlama (rate limiting)
-# EN: Command-based rate limiting
+# Command-based rate limiting
 _LAST_CMD_TIME = {}
-_CMD_COOLDOWN = 3  # saniye / seconds
+_CMD_COOLDOWN = 3  # seconds
 
 
 def api_call(token, method, data=None):
@@ -53,7 +53,7 @@ def api_call(token, method, data=None):
         resp = urllib.request.urlopen(req, timeout=30)
         return json.loads(resp.read().decode())
     except Exception as e:
-        print(f"API hatasi: {e}")
+        print(f"API error: {e}")
         return None
 
 def send_message(token, chat_id, text):
@@ -76,26 +76,22 @@ def edit_message(token, chat_id, message_id, text):
         "text": text[:4000]
     })
 
-def execute_command(cmd, sebep):
-    # TR: shell=False için komutu güvenli şekilde listeye çevir
-    # EN: Safely convert command to list for shell=False
+def execute_command(cmd, reason):
+    # Safely convert command to list for shell=False
     import shlex
     try:
         cmd_list = shlex.split(cmd)
         if not cmd_list:
-            return False, "Gecersiz komut."
+            return False, "Invalid command."
             
         binary = cmd_list[0]
-        # TR: Sadece tam yol üzerinden veya kesin eşleşen binary'leri kabul et
-        # EN: Only accept exact binary matches or full paths
+        # Only accept exact binary matches or full paths
         if binary not in ALLOWED_BINARIES:
-            return False, f"Bu binary izin listesinde degil: {binary}"
+            return False, f"This binary is not in the allowed list: {binary}"
     except Exception as e:
-        return False, f"Komut ayristirma hatasi: {e}"
+        return False, f"Command parsing error: {e}"
     
     try:
-        # TR: shell=False için komutu listeye çevir
-        # EN: Convert command to list for shell=False
         import shlex
         cmd_list = shlex.split(cmd)
         
@@ -109,16 +105,14 @@ def execute_command(cmd, sebep):
         
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        # TR: Tablo oluşturma soc-db-init.py'ye taşındı, burada sadece ekliyoruz
-        # EN: Table creation moved to soc-db-init.py, just inserting here
         c.execute(
-            "INSERT INTO komut_gecmisi (tarih, komut, sebep, sonuc, onaylayan) VALUES (?,?,?,?,?)",
-            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), cmd, sebep,
+            "INSERT INTO command_history (timestamp, command, reason, result, approved_by) VALUES (?,?,?,?,?)",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), cmd, reason,
              result.stdout + result.stderr, "telegram")
         )
         conn.commit()
         conn.close()
-        return True, result.stdout or "Komut calistirildi."
+        return True, result.stdout or "Command executed."
     except Exception as e:
         return False, str(e)
 
@@ -126,79 +120,47 @@ def get_pending_command(pending_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
-        "SELECT komut, sebep, message_id, chat_id, tarih FROM bekleyen_komutlar WHERE id=? AND durum='bekliyor'",
+        "SELECT command, reason, message_id, chat_id, timestamp FROM pending_commands WHERE id=? AND status='pending'",
         (pending_id,)
     )
     row = c.fetchone()
     conn.close()
     if not row:
         return None
-    tarih = datetime.strptime(row[4], "%Y-%m-%d %H:%M:%S")
-    if datetime.now() - tarih > timedelta(minutes=30):
-        update_pending_status(pending_id, "suresi_doldu")
+    timestamp = datetime.strptime(row[4], "%Y-%m-%d %H:%M:%S")
+    if datetime.now() - timestamp > timedelta(minutes=30):
+        update_pending_status(pending_id, "expired")
         return None
     return row[:4]
 
-def update_pending_status(pending_id, durum):
+def update_pending_status(pending_id, status):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("UPDATE bekleyen_komutlar SET durum=? WHERE id=?", (durum, pending_id))
+    c.execute("UPDATE pending_commands SET status=? WHERE id=?", (status, pending_id))
     conn.commit()
     conn.close()
 
-# ─── TR: KOMUT HANDLERLARI / EN: COMMAND HANDLERS ─────────────────────────
+# COMMAND HANDLERS
 
-def cmd_yardim(token, chat_id):
-    msg = (
-        "SOC Bot Komutlari\n"
-        "==================\n\n"
-        "/log <saat>\n"
-        "  Son X saatin log ozetini gosterir\n"
-        "  Ornek: /log 2\n\n"
-        "/durum\n"
-        "  CPU, RAM, disk ve servis durumunu gosterir\n\n"
-        "/banlist\n"
-        "  Aktif ban listesini ve son banlamalari gosterir\n\n"
-        "/ban <ip> <sure> <sebep>\n"
-        "  IP adresini banlar\n"
-        "  Sure: 1s=1saat, 1g=1gun, 7g=7gun, kalici\n"
-        "  Ornek: /ban 1.2.3.4 7g brute_force\n\n"
-        "/unban <ip>\n"
-        "  IP adresinin banini kaldirir\n"
-        "  Ornek: /unban 1.2.3.4\n\n"
-        "/tehdit\n"
-        "  Bugunun tespit edilen tehdit gecmisini gosterir\n\n"
-        "/analiz\n"
-        "  Aninda manuel log analizi baslatir\n\n"
-        "/istatistik\n"
-        "  Son 7 gunun guvenlik istatistiklerini gosterir\n\n"
-        "/yardim\n"
-        "  Bu yardim menusunu gosterir"
-    )
-    send_message(token, chat_id, msg)
 
 def cmd_log(token, chat_id, args):
-    saat = 1
+    hours = 1
     if args:
         import re as _re
         m = _re.match(r'^(\d+)$', args.strip())
         if m:
-            saat = int(m.group(1))
-    saat = min(max(saat, 1), 24)
-    since = (datetime.now() - timedelta(hours=saat)).strftime("%Y-%m-%d %H:%M:%S")
+            hours = int(m.group(1))
+    hours = min(max(hours, 1), 24)
+    since = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
 
     result = ""
     try:
-        # TR: Pipe gerektiren komutlar shell=True zorunlu
-        # EN: Pipe commands require shell=True
-        # TR: Tüm değerler sabit, kullanıcı girdisi yok
-        # EN: All values are static, no user input
         r = subprocess.run(
             "tail -n 200 /var/log/nginx/access.log | grep -vE '\" (444|403|301|302) ' | tail -20",
             shell=True, capture_output=True, text=True, timeout=10
         )
         if r.stdout.strip():
-            result += f"NGINX (son {saat}s):\n{r.stdout[:800]}\n\n"
+            result += f"NGINX (last {hours}h):\n{r.stdout[:800]}\n\n"
 
         r2 = subprocess.run(
             f"journalctl -u ssh --since '{since}' 2>/dev/null | grep -iE 'failed|invalid|accepted' | tail -15",
@@ -215,14 +177,14 @@ def cmd_log(token, chat_id, args):
             result += f"UFW:\n{r3.stdout[:400]}\n"
 
         if not result:
-            result = f"Son {saat} saatte dikkat cekici log bulunamadi."
+            result = f"No noteworthy logs found in the last {hours} hours."
 
     except subprocess.TimeoutExpired:
-        result = "Komut zaman asimina ugradi."
+        result = "Command timed out."
     except Exception as e:
-        result = f"Hata: {e}"
+        result = f"Error: {e}"
 
-    send_message(token, chat_id, f"Log Ozeti - Son {saat} Saat\n{'='*25}\n{result}")
+    send_message(token, chat_id, f"Log Summary - Last {hours} Hours\n{'='*25}\n{result}")
 
 def cmd_durum(token, chat_id):
     try:
@@ -232,18 +194,18 @@ def cmd_durum(token, chat_id):
         nginx = subprocess.run("systemctl is-active nginx", shell=True, capture_output=True, text=True).stdout.strip()
         ssh_s = subprocess.run("systemctl is-active ssh", shell=True, capture_output=True, text=True).stdout.strip()
         bot = subprocess.run("systemctl is-active soc-bot-listener", shell=True, capture_output=True, text=True).stdout.strip()
-        msg = (f"Sistem Durumu\n{'='*25}\n"
+        msg = (f"System Status\n{'='*25}\n"
                f"Disk: {disk}\n"
                f"RAM: {ram}\n"
                f"Uptime: {cpu}\n\n"
-               f"Servisler:\n"
+               f"Services:\n"
                f"  nginx: {nginx}\n"
-              f"  ssh: {ssh_s}\n"
+               f"  ssh: {ssh_s}\n"
                f"  soc-bot: {bot}\n"
-               f"Saat: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+               f"Time: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
         send_message(token, chat_id, msg)
     except Exception as e:
-        send_message(token, chat_id, f"Hata: {e}")
+        send_message(token, chat_id, f"Error: {e}")
 
 def cmd_banlist(token, chat_id):
     try:
@@ -256,146 +218,139 @@ def cmd_banlist(token, chat_id):
 
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("SELECT tarih, sebep, kural_id FROM ban_gecmisi ORDER BY id DESC LIMIT 10")
+        c.execute("SELECT timestamp, reason, rule_id FROM ban_log ORDER BY id DESC LIMIT 10")
         rows = c.fetchall()
         conn.close()
 
-        msg = f"Aktif Ban Listesi ({len(lines)} IP)\n{'='*25}\n"
+        msg = f"Active Ban List ({len(lines)} IPs)\n{'='*25}\n"
         for ip in lines[:20]:
             msg += f"  {ip}\n"
         if len(lines) > 20:
-            msg += f"  ... ve {len(lines)-20} tane daha\n"
+            msg += f"  ... and {len(lines)-20} more\n"
 
         if rows:
-            msg += f"\nSon Banlamalar:\n"
+            msg += f"\nRecent Bans:\n"
             for row in rows:
                 msg += f"  {row[0][:16]} | {row[2]} | {row[1]}\n"
 
         send_message(token, chat_id, msg)
     except Exception as e:
-        send_message(token, chat_id, f"Hata: {e}")
+        send_message(token, chat_id, f"Error: {e}")
 
 def cmd_ban(token, chat_id, args):
     if not args:
-        send_message(token, chat_id, "Kullanim: /ban <ip> <sure> <sebep>\nOrnek: /ban 1.2.3.4 7g brute_force")
+        send_message(token, chat_id, "Usage: /ban <ip> <duration> <reason>\nExample: /ban 1.2.3.4 7d brute_force")
         return
 
     parts = args.strip().split(None, 2)
     if len(parts) < 2:
-        send_message(token, chat_id, "Eksik parametre.\nKullanim: /ban <ip> <sure> <sebep>")
+        send_message(token, chat_id, "Missing parameters.\nUsage: /ban <ip> <duration> <reason>")
         return
 
     ip = parts[0]
-    sure_str = parts[1].lower()
-    sebep = parts[2] if len(parts) > 2 else "manuel_ban"
+    duration_str = parts[1].lower()
+    reason = parts[2] if len(parts) > 2 else "manual_ban"
 
     if not re.match(r'^\d+\.\d+\.\d+\.\d+$', ip):
-        send_message(token, chat_id, f"Gecersiz IP formati: {ip}")
+        send_message(token, chat_id, f"Invalid IP format: {ip}")
         return
 
-    # TR: Cloudflare ve whitelist kontrolu
-    # EN: Cloudflare and whitelist check
+    # Cloudflare and whitelist check
     skip = [
-        "127.", "10.", "192.168.",
-        "173.245.", "103.21.", "103.22.", "103.31.",
-        "141.101.", "108.162.", "162.158.", "104.16.",
-        "104.24.", "172.64.", "172.68.", "172.69.",
-        "172.70.", "172.71.", "YOUR_SERVER_IP."
-    ]
+        "127.", "10.", "172.16.", "172.17.",
+    ] + CLOUDFLARE_PREFIXES + ([SERVER_IP] if SERVER_IP else [])
     if any(ip.startswith(p) for p in skip):
-        send_message(token, chat_id, f"Bu IP banlanamaz (Cloudflare veya whitelist): {ip}")
+        send_message(token, chat_id, f"This IP cannot be banned (Cloudflare or whitelist): {ip}")
         return
 
-    # Sure hesapla
-    sure_map = {
-        "1s": "1 saat", "2s": "2 saat", "6s": "6 saat", "12s": "12 saat",
-        "1g": "1 gun", "7g": "7 gun", "30g": "30 gun", "90g": "90 gun",
-        "kalici": "kalici"
+    # Calculate duration
+    duration_map = {
+        "1h": "1 hour", "2h": "2 hours", "6h": "6 hours", "12h": "12 hours",
+        "1d": "1 day", "7d": "7 days", "30d": "30 days", "90d": "90 days",
+        "permanent": "permanent"
     }
-    sure_label = sure_map.get(sure_str, sure_str)
+    duration_label = duration_map.get(duration_str, duration_str)
 
     success, output = execute_command(
-        f"/usr/local/bin/nginx-ban-ip.sh {ip}", sebep
+        f"/usr/local/bin/nginx-ban-ip.sh {ip}", reason
     )
 
     if success:
-        # TR: Veritabanına kaydet
-        # EN: Save to database
+        # Save to database
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute(
-            "INSERT INTO ban_gecmisi (tarih, sebep, kural_id, otomatik) VALUES (?,?,?,0)",
-            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), sebep, "MANUEL")
+            "INSERT INTO ban_log (timestamp, ip, reason, rule_id, automatic) VALUES (?,?,?,?,0)",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), ip, reason, "MANUEL")
         )
         conn.commit()
         conn.close()
         send_message(token, chat_id,
-            f"Ban uygulandi!\n"
+            f"Ban applied!\n"
             f"IP: {ip}\n"
-            f"Sure: {sure_label}\n"
-            f"Sebep: {sebep}\n"
-            f"Saat: {datetime.now().strftime('%H:%M:%S')}")
+            f"Duration: {duration_label}\n"
+            f"Reason: {reason}\n"
+            f"Time: {datetime.now().strftime('%H:%M:%S')}")
     else:
-        send_message(token, chat_id, f"Ban basarisiz: {output}")
+        send_message(token, chat_id, f"Ban failed: {output}")
 
 
 def cmd_unban(token, chat_id, args):
     if not args:
-        send_message(token, chat_id, "Kullanim: /unban <IP>")
+        send_message(token, chat_id, "Usage: /unban <IP>")
         return
     ip = args.strip()
     if not re.match(r'^\d+\.\d+\.\d+\.\d+$', ip):
-        send_message(token, chat_id, "Gecersiz IP formati.")
+        send_message(token, chat_id, "Invalid IP format.")
         return
     success, output = execute_command(f"/usr/local/bin/nginx-unban-ip.sh {ip}", "telegram_unban")
     if success:
-        send_message(token, chat_id, f"Ban kaldirildi: {ip}")
+        send_message(token, chat_id, f"Ban removed: {ip}")
     else:
-        send_message(token, chat_id, f"Hata: {output}")
+        send_message(token, chat_id, f"Error: {output}")
 
-def cmd_tehdit(token, chat_id):
+def cmd_threats(token, chat_id):
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        bugun = datetime.now().strftime("%Y-%m-%d")
-        c.execute("""SELECT kategori, seviye, COUNT(*) as sayi
-            FROM tehditler WHERE tarih LIKE ?
-            GROUP BY kategori ORDER BY sayi DESC LIMIT 10""", (f"{bugun}%",))
+        today = datetime.now().strftime("%Y-%m-%d")
+        c.execute("""SELECT category, severity, COUNT(*) as count
+            FROM threats WHERE timestamp LIKE ?
+            GROUP BY category ORDER BY count DESC LIMIT 10""", (f"{today}%",))
         rows = c.fetchall()
 
-        c.execute("""SELECT kural_adi, seviye, COUNT(*) as sayi
-            FROM kural_tespitleri WHERE tarih LIKE ?
-            GROUP BY kural_id ORDER BY sayi DESC LIMIT 5""", (f"{bugun}%",))
-        kural_rows = c.fetchall()
+        c.execute("""SELECT rule_name, severity, COUNT(*) as count
+            FROM rule_detections WHERE timestamp LIKE ?
+            GROUP BY rule_id ORDER BY count DESC LIMIT 5""", (f"{today}%",))
+        rule_rows = c.fetchall()
         conn.close()
 
-        emoji = {"KRİTİK": "🚨", "YÜKSEK": "⚠️", "ORTA": "🔶", "DÜŞÜK": "🔷", "TEMİZ": "✅"}
-        msg = f"Tehdit Gecmisi - Bugun\n{'='*25}\n"
+        emoji = {"CRITICAL": "🚨", "HIGH": "⚠️", "MEDIUM": "🔶", "LOW": "🔷", "CLEAN": "✅"}
+        msg = f"Threat History - Today\n{'='*25}\n"
 
-        if kural_rows:
-            msg += "Kural Tespitleri:\n"
-            for r in kural_rows:
+        if rule_rows:
+            msg += "Rule Detections:\n"
+            for r in rule_rows:
                 e = emoji.get(r[1], "ℹ️")
-                msg += f"  {e} {r[0]}: {r[2]} kez\n"
+                msg += f"  {e} {r[0]}: {r[2]} times\n"
 
         if rows:
-            msg += "\nAI Tespitleri:\n"
+            msg += "\nAI Detections:\n"
             for r in rows:
                 e = emoji.get(r[1], "ℹ️")
-                msg += f"  {e} {r[0]}: {r[2]} kez\n"
+                msg += f"  {e} {r[0]}: {r[2]} times\n"
 
-        if not rows and not kural_rows:
-            msg += "Bugun tehdit tespit edilmedi."
+        if not rows and not rule_rows:
+            msg += "No threats detected today."
 
         send_message(token, chat_id, msg)
     except Exception as e:
-        send_message(token, chat_id, f"Hata: {e}")
+        send_message(token, chat_id, f"Error: {e}")
 
-def cmd_analiz(token, chat_id):
-    send_message(token, chat_id, "Manuel analiz baslatiliyor...")
+def cmd_analyze(token, chat_id):
+    send_message(token, chat_id, "Manual analysis starting...")
     try:
-        # TR: shell=True kaldirildi, komutlar ayri calistiriliyor
-        # EN: shell=True removed, commands executed separately
+        # shell=True removed, commands executed separately
         subprocess.run(["rm", "-f", "/var/lib/soc/last_run"], shell=False)
         result = subprocess.run(
             ["/usr/local/bin/soc-log-analyzer.sh"],
@@ -403,90 +358,89 @@ def cmd_analiz(token, chat_id):
         )
         output = result.stdout
 
-        # Sadece ANALİZ SONUCU kısmını çıkar
-        analiz = ""
-        if "ANALİZ SONUCU" in output:
-            idx = output.index("ANALİZ SONUCU")
+        # Extract only the ANALYSIS RESULT part
+        analysis = ""
+        if "ANALYSIS RESULT" in output:
+            idx = output.index("ANALYSIS RESULT")
             raw = output[idx:].strip()
             lines = []
             for line in raw.split('\n'):
-                if any(x in line for x in ['Kaydedildi:', 'Bildirim', 'Telegram', 
-                    'Model deneniyor', 'Analiz başarılı', 'byte log',
-                    'Kural motoru', 'Otomatik ban', 'Ban uygulandı',
-                    'Gönderildi:', '===']):
+                if any(x in line for x in ['Saved:', 'Notification', 'Telegram', 
+                    'Attempting model', 'Analysis successful', 'byte log',
+                    'Rule engine', 'Automated ban', 'Ban applied',
+                    'Sent:', '===']):
                     break
                 lines.append(line)
-            analiz = '\n'.join(lines).strip()
+            analysis = '\n'.join(lines).strip()
         
-        if not analiz or len(analiz) < 10:
-            analiz = "TEMİZ - Anormal aktivite tespit edilmedi."
+        if not analysis or len(analysis) < 10:
+            analysis = "CLEAN - No abnormal activity detected."
 
-        send_message(token, chat_id, f"Analiz Tamamlandi\n{'='*25}\n{analiz}")
+        send_message(token, chat_id, f"Analysis Completed\n{'='*25}\n{analysis}")
     except subprocess.TimeoutExpired:
-        send_message(token, chat_id, "Analiz zaman asimina ugradi (120s).")
+        send_message(token, chat_id, "Analysis timed out (120s).")
     except Exception as e:
-        send_message(token, chat_id, f"Hata: {e}")
+        send_message(token, chat_id, f"Error: {e}")
 
-def cmd_istatistik(token, chat_id):
+def cmd_stats(token, chat_id):
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("""SELECT tarih, toplam_analiz, temiz, dusuk, orta, yuksek, kritik
-            FROM istatistikler ORDER BY tarih DESC LIMIT 7""")
+        c.execute("""SELECT timestamp, total_analyses, clean, low, medium, high, critical
+            FROM statistics ORDER BY timestamp DESC LIMIT 7""")
         rows = c.fetchall()
         conn.close()
 
-        msg = f"Haftalik Istatistik\n{'='*25}\n"
+        msg = f"Weekly Statistics\n{'='*25}\n"
         if rows:
             for r in rows:
                 msg += (f"{r[0]}: "
-                       f"Toplam:{r[1]} "
-                       f"Temiz:{r[2]} "
-                       f"Orta:{r[4]} "
-                       f"Yuksek:{r[5]} "
-                       f"Kritik:{r[6]}\n")
+                       f"Total:{r[1]} "
+                       f"Clean:{r[2]} "
+                       f"Medium:{r[4]} "
+                       f"High:{r[5]} "
+                       f"Critical:{r[6]}\n")
         else:
-            msg += "Henuz istatistik yok."
+            msg += "No statistics yet."
 
         send_message(token, chat_id, msg)
     except Exception as e:
-        send_message(token, chat_id, f"Hata: {e}")
+        send_message(token, chat_id, f"Error: {e}")
 
-def cmd_yardim(token, chat_id):
+def cmd_help(token, chat_id):
     msg = (
-        "SOC Bot Komutlari\n"
+        "SOC Bot Commands\n"
         "==================\n"
-        "/log <saat> - Log ozeti (orn: /log 2)\n"
-        "/durum - Sistem durumu\n"
-        "/banlist - Aktif ban listesi\n"
-        "/unban <ip> - IP ban kaldir\n"
-        "/tehdit - Bugunun tehdit gecmisi\n"
-        "/analiz - Manuel analiz baslat\n"
-        "/istatistik - Haftalik istatistik\n"
-        "/yardim - Bu menu"
+        "/log <hours> - Log summary (e.g. /log 2)\n"
+        "/status - System status\n"
+        "/banlist - Active ban list\n"
+        "/unban <ip> - Remove IP ban\n"
+        "/threats - Today's threat history\n"
+        "/analyze - Start manual analysis\n"
+        "/stats - Weekly statistics\n"
+        "/help - This menu"
     )
     send_message(token, chat_id, msg)
 
-# ─── TR: MESAJ YAKALAYICI / EN: MESSAGE HANDLER ───────────────────────────
+# MESSAGE HANDLER
 
 def process_message(token, allowed_chat_id, message):
     chat_id = message["chat"]["id"]
     text = message.get("text", "").strip()
 
     if str(chat_id) != str(allowed_chat_id):
-        send_message(token, chat_id, "Yetkisiz erisim.")
+        send_message(token, chat_id, "Unauthorized access.")
         return
 
     if not text.startswith("/"):
         return
 
-    # TR: Hız sınırlama kontrolü
-    # EN: Rate limit check
+    # Rate limit check
     now = time.time()
     if chat_id in _LAST_CMD_TIME:
         elapsed = now - _LAST_CMD_TIME[chat_id]
         if elapsed < _CMD_COOLDOWN:
-            send_message(token, chat_id, f"⚠️ Cok hizli istek gonderiyorsunuz. Lutfen {int(_CMD_COOLDOWN - elapsed) + 1} saniye bekleyin.")
+            send_message(token, chat_id, f"⚠️ You are sending requests too fast. Please wait {int(_CMD_COOLDOWN - elapsed) + 1} seconds.")
             return
     _LAST_CMD_TIME[chat_id] = now
 
@@ -496,26 +450,26 @@ def process_message(token, allowed_chat_id, message):
 
     if cmd == "/log":
         cmd_log(token, chat_id, args)
-    elif cmd == "/durum":
-        cmd_durum(token, chat_id)
+    elif cmd == "/status":
+        cmd_status(token, chat_id)
     elif cmd == "/banlist":
         cmd_banlist(token, chat_id)
     elif cmd == "/unban":
         cmd_unban(token, chat_id, args)
-    elif cmd == "/tehdit":
-        cmd_tehdit(token, chat_id)
-    elif cmd == "/analiz":
-        cmd_analiz(token, chat_id)
-    elif cmd == "/istatistik":
-        cmd_istatistik(token, chat_id)
+    elif cmd == "/threats":
+        cmd_threats(token, chat_id)
+    elif cmd == "/analyze":
+        cmd_analyze(token, chat_id)
+    elif cmd == "/stats":
+        cmd_stats(token, chat_id)
     elif cmd == "/ban":
         cmd_ban(token, chat_id, args)
-    elif cmd == "/yardim" or cmd == "/start":
-        cmd_yardim(token, chat_id)
+    elif cmd == "/help" or cmd == "/start":
+        cmd_help(token, chat_id)
     else:
-        send_message(token, chat_id, f"Bilinmeyen komut: {cmd}\n/yardim yazin.")
+        send_message(token, chat_id, f"Unknown command: {cmd}\nType /help.")
 
-# ─── TR: CALLBACK YAKALAYICI / EN: CALLBACK HANDLER ───────────────────────
+# CALLBACK HANDLER
 
 def process_callback(token, callback_query):
     data = callback_query.get("data", "")
@@ -536,52 +490,51 @@ def process_callback(token, callback_query):
 
     row = get_pending_command(pending_id)
     if not row:
-        answer_callback(token, callback_id, "Bu komut artik gecerli degil.")
+        answer_callback(token, callback_id, "This command is no longer valid.")
         return
 
-    komut, sebep, orig_message_id, orig_chat_id = row
+    command, reason, orig_message_id, orig_chat_id = row
 
-    if action == "ONAYLA":
-        answer_callback(token, callback_id, "Komut calistiriliyor...")
-        success, output = execute_command(komut, sebep)
-        update_pending_status(pending_id, "onaylandi")
+    if action == "APPROVE":
+        answer_callback(token, callback_id, "Executing command...")
+        success, output = execute_command(command, reason)
+        update_pending_status(pending_id, "approved")
         if success:
             edit_message(token, chat_id, message_id,
-                f"Komut calistirildi!\n\nKomut: {komut}\nCikti: {output[:300]}\nSaat: {datetime.now().strftime('%H:%M:%S')}")
+                f"Command executed!\n\nCommand: {command}\nOutput: {output[:300]}\nTime: {datetime.now().strftime('%H:%M:%S')}")
         else:
             edit_message(token, chat_id, message_id,
-                f"Komut basarisiz!\n\nKomut: {komut}\nHata: {output[:300]}")
+                f"Command failed!\n\nCommand: {command}\nError: {output[:300]}")
 
-    elif action == "REDDET":
-        answer_callback(token, callback_id, "Komut iptal edildi.")
-        update_pending_status(pending_id, "reddedildi")
+    elif action == "REJECT":
+        answer_callback(token, callback_id, "Command cancelled.")
+        update_pending_status(pending_id, "rejected")
         edit_message(token, chat_id, message_id,
-            original_text + "\n\nReddedildi.")
+            original_text + "\n\nRejected.")
 
 # ─── INIT & MAIN ─────────────────────────────────────────────────
 
 def init_db():
-    # TR: Tablo baslatma işi soc-db-init.py tarafından yapılıyor
-    # EN: Table initialization is handled by soc-db-init.py
+    # Table initialization is handled by soc-db-init.py
     pass
 
 def main():
     token = config.get("TELEGRAM_BOT_TOKEN")
-    chat_id = config.get("TELEGRAM_CHAT_ID")
+    allowed_chat_id = config.get("TELEGRAM_CHAT_ID")
     init_db()
-    print(f"[{datetime.now()}] SOC Bot Listener basladi...")
+    print(f"[{datetime.now()}] SOC Bot Listener started...")
 
-    # Bot komutlarini kaydet
+    # Register bot commands
     api_call(token, "setMyCommands", {"commands": [
-        {"command": "log", "description": "Son X saatin log ozeti"},
-        {"command": "durum", "description": "Sistem durumu"},
-        {"command": "banlist", "description": "Aktif ban listesi"},
-        {"command": "unban", "description": "IP ban kaldir"},
-        {"command": "tehdit", "description": "Bugunun tehdit gecmisi"},
-        {"command": "analiz", "description": "Manuel analiz baslat"},
-        {"command": "istatistik", "description": "Haftalik istatistik"},
-        {"command": "yardim", "description": "Komut listesi"},
-        {"command": "ban", "description": "IP banla - /ban <ip> <sure> <sebep>"},    
+        {"command": "log", "description": "Last X hours log summary"},
+        {"command": "status", "description": "System status"},
+        {"command": "banlist", "description": "Active ban list"},
+        {"command": "unban", "description": "Remove IP ban"},
+        {"command": "threats", "description": "Today's threat history"},
+        {"command": "analyze", "description": "Start manual analysis"},
+        {"command": "stats", "description": "Weekly statistics"},
+        {"command": "help", "description": "Command list"},
+        {"command": "ban", "description": "Ban IP - /ban <ip> <duration> <reason>"},    
 ]})
 
     offset = 0
@@ -602,13 +555,13 @@ def main():
                 if "callback_query" in update:
                     process_callback(token, update["callback_query"])
                 elif "message" in update:
-                    process_message(token, chat_id, update["message"])
+                    process_message(token, allowed_chat_id, update["message"])
 
         except KeyboardInterrupt:
-            print("Listener durduruldu.")
+            print("Listener stopped.")
             break
         except Exception as e:
-            print(f"Hata: {e}")
+            print(f"Error: {e}")
             time.sleep(5)
 
 if __name__ == "__main__":

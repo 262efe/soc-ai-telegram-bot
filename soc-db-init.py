@@ -11,72 +11,115 @@ os.makedirs("/var/lib/soc", exist_ok=True)
 conn = sqlite3.connect(DB_PATH)
 c = conn.cursor()
 
-# TR: Analiz sonuçları tablosu
-# EN: Analysis results table
+# Analysis results table
 c.execute('''
-CREATE TABLE IF NOT EXISTS analizler (
+CREATE TABLE IF NOT EXISTS analyses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tarih TEXT NOT NULL,
-    ozet TEXT,
-    ham_analiz TEXT,
-    en_yuksek_seviye TEXT DEFAULT 'TEMİZ',
-    bildirim_gonderildi INTEGER DEFAULT 0,
-    log_boyutu INTEGER
+    timestamp TEXT NOT NULL,
+    summary TEXT,
+    raw_analysis TEXT,
+    max_severity TEXT DEFAULT 'CLEAN',
+    notification_sent INTEGER DEFAULT 0,
+    log_size INTEGER
 )
 ''')
 
-# TR: Tespit edilen tehditler tablosu
-# EN: Detected threats table
+# Detected threats table
 c.execute('''
-CREATE TABLE IF NOT EXISTS tehditler (
+CREATE TABLE IF NOT EXISTS threats (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    analiz_id INTEGER,
-    tarih TEXT NOT NULL,
-    kategori TEXT,
-    seviye TEXT,
-    aciklama TEXT,
-    aksiyon TEXT,
-    FOREIGN KEY (analiz_id) REFERENCES analizler(id)
+    analysis_id INTEGER,
+    timestamp TEXT NOT NULL,
+    category TEXT,
+    severity TEXT,
+    description TEXT,
+    action TEXT,
+    FOREIGN KEY (analysis_id) REFERENCES analyses(id)
 )
 ''')
 
-# TR: İstatistik tablosu
-# EN: Statistics table
+# Statistics table
 c.execute('''
-CREATE TABLE IF NOT EXISTS istatistikler (
+CREATE TABLE IF NOT EXISTS statistics (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tarih TEXT NOT NULL,
-    toplam_analiz INTEGER DEFAULT 0,
-    temiz INTEGER DEFAULT 0,
-    dusuk INTEGER DEFAULT 0,
-    orta INTEGER DEFAULT 0,
-    yuksek INTEGER DEFAULT 0,
-    kritik INTEGER DEFAULT 0
+    timestamp TEXT NOT NULL,
+    total_analyses INTEGER DEFAULT 0,
+    clean INTEGER DEFAULT 0,
+    low INTEGER DEFAULT 0,
+    medium INTEGER DEFAULT 0,
+    high INTEGER DEFAULT 0,
+    critical INTEGER DEFAULT 0
 )
 ''')
 
-# TR: Ban geçmişi tablosu
-# EN: Ban history table
+# Ban log table
 c.execute('''
-CREATE TABLE IF NOT EXISTS ban_gecmisi (
+CREATE TABLE IF NOT EXISTS ban_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tarih TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
     ip TEXT,
-    sebep TEXT,
-    kural_id TEXT,
-    otomatik INTEGER DEFAULT 1,
-    ban_bitis TEXT
+    reason TEXT,
+    rule_id TEXT,
+    automatic INTEGER DEFAULT 1,
+    expiry TEXT
 )
 ''')
+
+# Command history table
+c.execute('''
+CREATE TABLE IF NOT EXISTS command_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    command TEXT,
+    reason TEXT,
+    result TEXT,
+    approved_by TEXT
+)
+''')
+
+# Pending commands table
+c.execute('''
+CREATE TABLE IF NOT EXISTS pending_commands (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    command TEXT,
+    reason TEXT,
+    message_id INTEGER,
+    chat_id TEXT,
+    status TEXT DEFAULT 'pending'
+)
+''')
+
+# Rule detections table
+c.execute('''
+CREATE TABLE IF NOT EXISTS rule_detections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    rule_id TEXT,
+    rule_name TEXT,
+    severity TEXT,
+    description TEXT,
+    match_count INTEGER,
+    action TEXT
+)
+''')
+
+# Create indexes for performance optimization
+c.execute('CREATE INDEX IF NOT EXISTS idx_analyses_timestamp ON analyses (timestamp)')
+c.execute('CREATE INDEX IF NOT EXISTS idx_threats_analysis_id ON threats (analysis_id)')
+c.execute('CREATE INDEX IF NOT EXISTS idx_threats_category ON threats (category)')
+c.execute('CREATE INDEX IF NOT EXISTS idx_statistics_timestamp ON statistics (timestamp)')
+c.execute('CREATE INDEX IF NOT EXISTS idx_ban_log_ip ON ban_log (ip)')
+c.execute('CREATE INDEX IF NOT EXISTS idx_rule_detections_timestamp ON rule_detections (timestamp)')
+c.execute('CREATE INDEX IF NOT EXISTS idx_rule_detections_rule_id ON rule_detections (rule_id)')
 
 conn.commit()
 conn.close()
 
-# TR: Veritabanı dosya izinlerini kısıtla (0600)
-# EN: Restrict database file permissions (0600)
+# Restrict database file permissions (0600)
 try:
     os.chmod(DB_PATH, stat.S_IRUSR | stat.S_IWUSR)
 except Exception as e:
-    print(f"Izin guncelleme hatasi: {e}")
+    print(f"Permission update error: {e}")
 
-print("Veritabanı başarıyla oluşturuldu ve yapılandırıldı:", DB_PATH)
+print("Database successfully created and configured:", DB_PATH)

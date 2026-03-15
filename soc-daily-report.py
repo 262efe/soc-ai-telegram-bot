@@ -10,47 +10,43 @@ from soc_config import load_soc_config
 config = load_soc_config()
 DB_PATH = config.get("DB_PATH", "/var/lib/soc/soc_logs.db")
 
-def get_daily_stats(tarih):
+def get_daily_stats(date):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
-    # TR: Genel istatistik
-    # EN: General statistics
-    c.execute("SELECT * FROM istatistikler WHERE tarih = ?", (tarih,))
+    # General statistics
+    c.execute("SELECT * FROM statistics WHERE timestamp = ?", (date,))
     stats = c.fetchone()
     
-    # TR: Kural tespitleri
-    # EN: Rule detections
+    # Rule detections
     c.execute("""
-        SELECT kural_adi, seviye, COUNT(*) as sayi 
-        FROM kural_tespitleri 
-        WHERE tarih LIKE ? 
-        GROUP BY kural_id 
-        ORDER BY sayi DESC
-    """, (f"{tarih}%",))
-    kural_stats = c.fetchall()
+        SELECT rule_name, severity, COUNT(*) as match_count 
+        FROM rule_detections 
+        WHERE timestamp LIKE ? 
+        GROUP BY rule_id 
+        ORDER BY match_count DESC
+    """, (f"{date}%",))
+    rule_stats = c.fetchall()
     
-    # TR: Ban geçmişi
-    # EN: Ban history
+    # Ban history
     c.execute("""
-        SELECT COUNT(*) FROM ban_gecmisi WHERE tarih LIKE ?
-    """, (f"{tarih}%",))
+        SELECT COUNT(*) FROM ban_log WHERE timestamp LIKE ?
+    """, (f"{date}%",))
     ban_count = c.fetchone()[0]
     
-    # TR: En yüksek tehditler
-    # EN: Highest threats
+    # Highest threats
     c.execute("""
-        SELECT kategori, seviye, COUNT(*) as sayi
-        FROM tehditler
-        WHERE tarih LIKE ?
-        GROUP BY kategori
-        ORDER BY sayi DESC
+        SELECT category, severity, COUNT(*) as match_count
+        FROM threats
+        WHERE timestamp LIKE ?
+        GROUP BY category
+        ORDER BY match_count DESC
         LIMIT 5
-    """, (f"{tarih}%",))
-    tehditler = c.fetchall()
+    """, (f"{date}%",))
+    threats = c.fetchall()
     
     conn.close()
-    return stats, kural_stats, ban_count, tehditler
+    return stats, rule_stats, ban_count, threats
 
 def send_telegram(token, chat_id, message):
     payload = json.dumps({
@@ -65,55 +61,54 @@ def send_telegram(token, chat_id, message):
     )
     try:
         urllib.request.urlopen(req)
-        print("Günlük rapor Telegram'a gönderildi")
+        print("Daily report sent to Telegram")
     except Exception as e:
-        print(f"Telegram hatası: {e}")
+        print(f"Telegram error: {e}")
 
 def main():
-    dun = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-    bugun = datetime.now().strftime('%Y-%m-%d')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    today = datetime.now().strftime('%Y-%m-%d')
     
-    # TR: Bugünün verisini al (sabah raporu için bugünü kullan)
-    # EN: Get today's data (use today for the morning report)
-    stats, kural_stats, ban_count, tehditler = get_daily_stats(bugun)
+    # Get today's data (use today for report)
+    stats, rule_stats, ban_count, threats = get_daily_stats(today)
     
-    seviye_emoji = {"TEMİZ": "✅", "DÜŞÜK": "🔷", "ORTA": "🔶", "YÜKSEK": "⚠️", "KRİTİK": "🚨"}
+    severity_emoji = {"CLEAN": "✅", "LOW": "🔷", "MEDIUM": "🔶", "HIGH": "⚠️", "CRITICAL": "🚨"}
     
-    rapor = f"""📊 GÜNLÜK GÜVENLİK RAPORU
-Tarih: {bugun}
+    report = f"""📊 DAILY SECURITY REPORT
+Date: {today}
 {'='*30}
 
-📈 ANALİZ İSTATİSTİKLERİ
+📈 ANALYSIS STATISTICS
 """
     
     if stats:
-        rapor += f"""• Toplam Analiz: {stats[2]}
-- Temiz: {stats[3]} ✅
-- Düşük: {stats[4]} 🔷
-- Orta: {stats[5]} 🔶
-- Yüksek: {stats[6]} ⚠️
-- Kritik: {stats[7]} 🚨
+        report += f"""• Total Analyses: {stats[2]}
+- Clean: {stats[3]} ✅
+- Low: {stats[4]} 🔷
+- Medium: {stats[5]} 🔶
+- High: {stats[6]} ⚠️
+- Critical: {stats[7]} 🚨
 """
     else:
-        rapor += "• Veri bulunamadı\n"
+        report += "• No data found\n"
     
-    rapor += f"\n🔒 OTOMATIK BAN\n• Bugün banlanan: {ban_count} IP\n"
+    report += f"\n🔒 AUTOMATIC BAN\n• Banned today: {ban_count} IP\n"
     
-    if kural_stats:
-        rapor += "\n📋 KURAL TESPİTLERİ\n"
-        for kural in kural_stats[:5]:
-            emoji = seviye_emoji.get(kural[1], "ℹ️")
-            rapor += f"• {kural[0]}: {kural[2]} kez {emoji}\n"
+    if rule_stats:
+        report += "\n📋 RULE DETECTIONS\n"
+        for rule in rule_stats[:5]:
+            emoji = severity_emoji.get(rule[1], "ℹ️")
+            report += f"• {rule[0]}: {rule[2]} times {emoji}\n"
     
-    if tehditler:
-        rapor += "\n🎯 AI TESPİTLERİ\n"
-        for t in tehditler:
-            emoji = seviye_emoji.get(t[1], "ℹ️")
-            rapor += f"• {t[0]}: {t[2]} kez {emoji}\n"
+    if threats:
+        report += "\n🎯 AI DETECTIONS\n"
+        for t in threats:
+            emoji = severity_emoji.get(t[1], "ℹ️")
+            report += f"• {t[0]}: {t[2]} times {emoji}\n"
     
-    rapor += f"\n⏰ Rapor: {datetime.now().strftime('%H:%M:%S')}"
+    report += f"\n⏰ Report: {datetime.now().strftime('%H:%M:%S')}"
     
-    send_telegram(config["TELEGRAM_BOT_TOKEN"], config["TELEGRAM_CHAT_ID"], rapor)
+    send_telegram(config["TELEGRAM_BOT_TOKEN"], config["TELEGRAM_CHAT_ID"], report)
 
 if __name__ == "__main__":
     main()

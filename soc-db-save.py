@@ -11,24 +11,23 @@ DB_PATH = config.get("DB_PATH", "/var/lib/soc/soc_logs.db")
 
 def parse_analysis(analysis_text):
     """
-    TR: Analiz metnini parse et, tehditleri çıkar
-    EN: Parse the analysis text and extract threats
+    Parse the analysis text and extract threats
     """
     threats = []
     current = {}
 
     for line in analysis_text.split('\n'):
         line = line.strip()
-        if line.startswith('- Kategori:') or line.startswith('• Kategori:'):
+        if line.startswith('- Category:') or line.startswith('• Category:'):
             if current:
                 threats.append(current)
-            current = {'kategori': line.split(':', 1)[1].strip()}
-        elif line.startswith('Seviye:') and current:
-            current['seviye'] = line.split(':', 1)[1].strip()
-        elif line.startswith('Açıklama:') and current:
-            current['aciklama'] = line.split(':', 1)[1].strip()
-        elif line.startswith('Aksiyon:') and current:
-            current['aksiyon'] = line.split(':', 1)[1].strip()
+            current = {'category': line.split(':', 1)[1].strip()}
+        elif line.startswith('Severity:') and current:
+            current['severity'] = line.split(':', 1)[1].strip()
+        elif line.startswith('Description:') and current:
+            current['description'] = line.split(':', 1)[1].strip()
+        elif line.startswith('Action:') and current:
+            current['action'] = line.split(':', 1)[1].strip()
 
     if current:
         threats.append(current)
@@ -38,16 +37,15 @@ def parse_analysis(analysis_text):
 
 def get_highest_severity(threats):
     """
-    TR: En yüksek tehdit seviyesini bul
-    EN: Find the highest threat severity
+    Find the highest threat severity
     """
-    severity_order = ['TEMİZ', 'DÜŞÜK', 'ORTA', 'YÜKSEK', 'KRİTİK']
-    highest = 'TEMİZ'
+    severity_order = ['CLEAN', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
+    highest = 'CLEAN'
 
     for t in threats:
-        seviye = t.get('seviye', 'TEMİZ').upper()
+        severity = t.get('severity', 'CLEAN').upper()
         for s in severity_order:
-            if s in seviye and severity_order.index(s) > severity_order.index(highest):
+            if s in severity and severity_order.index(s) > severity_order.index(highest):
                 highest = s
 
     return highest
@@ -55,33 +53,34 @@ def get_highest_severity(threats):
 
 def mask_analysis(text):
     """
-    TR: Veritabanına yazmadan önce kişisel verileri maskele
-    EN: Mask personal data before writing to database
+    Mask personal data before writing to database
     """
-    # TR: IP adreslerini maskele (son oktet XXX)
-    # EN: Mask IP addresses (last octet XXX)
+    # Mask IP addresses (last octet XXX)
     text = re.sub(
         r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.)\d{1,3}\b',
         r'\1XXX',
         text
     )
-    # TR: E-posta adreslerini maskele
-    # EN: Mask email addresses
+    # Mask IPv6 addresses
+    text = re.sub(
+        r'([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}',
+        '[IPv6_MASKED]',
+        text
+    )
+    # Mask email addresses
     text = re.sub(
         r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
         '[EMAIL_MASKED]',
         text
     )
-    # TR: Şifre parametrelerini maskele
-    # EN: Mask password parameters
+    # Mask password parameters
     text = re.sub(
         r'(password|pass|pwd)=[^ &]*',
         r'\1=[PASS_MASKED]',
         text,
         flags=re.IGNORECASE
     )
-    # TR: Bearer token'ları maskele
-    # EN: Mask Bearer tokens
+    # Mask Bearer tokens
     text = re.sub(
         r'Bearer [a-zA-Z0-9._-]+',
         'Bearer [TOKEN_MASKED]',
@@ -90,84 +89,77 @@ def mask_analysis(text):
     return text
 
 
-def save_analysis(analysis_text, log_boyutu, bildirim_gonderildi):
-    # TR: Veritabanına yazmadan önce ekstra maskeleme uygula
-    # EN: Apply extra masking before writing to database
+def save_analysis(analysis_text, log_size, notification_sent):
+    # Apply extra masking before writing to database
     analysis_text = mask_analysis(analysis_text)
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    tarih = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     threats = parse_analysis(analysis_text)
     highest = get_highest_severity(threats)
 
-    # TR: Ana analizi kaydet
-    # EN: Save the main analysis
+    # Save the main analysis
     c.execute('''
-        INSERT INTO analizler (tarih, ham_analiz, en_yuksek_seviye, bildirim_gonderildi, log_boyutu)
+        INSERT INTO analyses (timestamp, raw_analysis, max_severity, notification_sent, log_size)
         VALUES (?, ?, ?, ?, ?)
-    ''', (tarih, analysis_text, highest, bildirim_gonderildi, log_boyutu))
+    ''', (timestamp, analysis_text, highest, notification_sent, log_size))
 
-    analiz_id = c.lastrowid
+    analysis_id = c.lastrowid
 
-    # TR: Tehditleri kaydet
-    # EN: Save the threats
+    # Save the threats
     for t in threats:
-        seviye = t.get('seviye', 'TEMİZ')
-        if 'TEMİZ' not in seviye.upper():
+        severity = t.get('severity', 'CLEAN')
+        if 'CLEAN' not in severity.upper():
             c.execute('''
-                INSERT INTO tehditler (analiz_id, tarih, kategori, seviye, aciklama, aksiyon)
+                INSERT INTO threats (analysis_id, timestamp, category, severity, description, action)
                 VALUES (?, ?, ?, ?, ?, ?)
             ''', (
-                analiz_id, tarih,
-                t.get('kategori', ''),
-                seviye,
-                t.get('aciklama', ''),
-                t.get('aksiyon', '')
+                analysis_id, timestamp,
+                t.get('category', ''),
+                severity,
+                t.get('description', ''),
+                t.get('action', '')
             ))
 
-    # TR: Günlük istatistiği güncelle
-    # EN: Update daily statistics
-    bugun = datetime.now().strftime('%Y-%m-%d')
-    c.execute('SELECT id FROM istatistikler WHERE tarih = ?', (bugun,))
+    # Update daily statistics
+    today = datetime.now().strftime('%Y-%m-%d')
+    c.execute('SELECT id FROM statistics WHERE timestamp = ?', (today,))
     row = c.fetchone()
 
-    # TR: Sütun adını sabit listeden doğrula - SQL injection önlemi
-    # EN: Validate column name from fixed list - SQL injection prevention
-    VALID_COLUMNS = {'temiz', 'dusuk', 'orta', 'yuksek', 'kritik'}
-    seviye_col = {
-        'TEMİZ': 'temiz', 'DÜŞÜK': 'dusuk',
-        'ORTA': 'orta', 'YÜKSEK': 'yuksek', 'KRİTİK': 'kritik'
-    }.get(highest, 'temiz')
+    # Validate column name from fixed list - SQL injection prevention
+    VALID_COLUMNS = {'clean', 'low', 'medium', 'high', 'critical'}
+    severity_col = {
+        'CLEAN': 'clean', 'LOW': 'low',
+        'MEDIUM': 'medium', 'HIGH': 'high', 'CRITICAL': 'critical'
+    }.get(highest, 'clean')
 
-    # TR: Güvenlik kontrolü - geçersiz sütun adı ise varsayılana dön
-    # EN: Safety check - fall back to default if invalid column name
-    if seviye_col not in VALID_COLUMNS:
-        seviye_col = 'temiz'
+    # Safety check - fall back to default if invalid column name
+    if severity_col not in VALID_COLUMNS:
+        severity_col = 'clean'
 
     if row:
-        # TR: Sütun adı sabit listeden geldiği için f-string güvenli
-        # EN: Column name comes from fixed list so f-string is safe here
+        # Column name comes from fixed list so f-string is safe here
         c.execute(f'''
-            UPDATE istatistikler
-            SET toplam_analiz = toplam_analiz + 1, {seviye_col} = {seviye_col} + 1
-            WHERE tarih = ?
-        ''', (bugun,))
+            UPDATE statistics
+            SET total_analyses = total_analyses + 1, {severity_col} = {severity_col} + 1
+            WHERE timestamp = ?
+        ''', (today,))
     else:
         c.execute(f'''
-            INSERT INTO istatistikler (tarih, toplam_analiz, {seviye_col})
+            INSERT INTO statistics (timestamp, total_analyses, {severity_col})
             VALUES (?, 1, 1)
-        ''', (bugun,))
+        ''', (today,))
 
     conn.commit()
     conn.close()
 
-    print(f"Kaydedildi: {tarih} | Seviye: {highest} | "
-          f"Tehdit sayısı: {len([t for t in threats if 'TEMİZ' not in t.get('seviye', 'TEMİZ').upper()])}")
+    print(f"Saved: {timestamp} | Severity: {highest} | "
+          f"Threat count: {len([t for t in threats if 'CLEAN' not in t.get('severity', 'CLEAN').upper()])}")
 
 if __name__ == '__main__':
     analysis_text = sys.stdin.read()
-    log_boyutu = int(sys.argv[1]) if len(sys.argv) > 1 else 0
-    bildirim = int(sys.argv[2]) if len(sys.argv) > 2 else 0
-    save_analysis(analysis_text, log_boyutu, bildirim)
+    log_size = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+    notified = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+    save_analysis(analysis_text, log_size, notified)
