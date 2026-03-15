@@ -1,0 +1,14 @@
+[Unit]
+Description=SOC Telegram Bot Listener
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/soc-bot-listener.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/soc-bot-listener.log
+StandardError=append:/var/log/soc-bot-listener.log
+
+[Install]
+WantedBy=multi-user.target
