@@ -62,7 +62,7 @@ This repository contains a comprehensive, automated Security Operations Center (
 - `soc-rule-engine.py`: Defines the attack criteria and automated responses.
 - `soc_config.py`: Centralized configuration utility for all SOC components.
 - `soc-auto-ban.py / soc-auto-unban.py`: Logic to securely block or release IP addresses.
-- `soc-bot-listener.py`: Telegram Bot logic. Listens for your commands like `/ban`, `/unban`, `/durum`, `/tehdit`, etc.
+- `soc-bot-listener.py`: Telegram Bot logic. Listens for your commands like `/ban`, `/unban`, `/status`, `/threats`, etc.
 - `soc-notifier.py`: Sends detected threats to Telegram and manages approval/rejection buttons.
 - `soc-daily-report.py`: Aggregates the daily threat data and sends a summary to your Telegram chat.
 - `soc-db-init.py`: Creates and initializes the database tables.
@@ -74,14 +74,14 @@ This repository contains a comprehensive, automated Security Operations Center (
 ## Telegram Bot Commands
 
 - `/log <hours>` - Displays the log summary (Nginx, SSH, UFW) of the last X hours (e.g., `/log 2`)
-- `/durum` - Shows real-time system CPU, RAM, disk usage, and background service status
+- `/status` - Shows real-time system CPU, RAM, disk usage, and background service status
 - `/banlist` - Lists the currently banned IPs and recent ban logs
 - `/ban <ip> <duration> <reason>` - Bans the given IP temporarily or permanently (`1s`, `1g`, `7g`, `kalici`)
 - `/unban <ip>` - Removes an IP ban from the Nginx firewall
-- `/tehdit` - Lists today's detected and blocked threat history
-- `/analiz` - Instantly triggers a manual deep analysis of server logs using the Groq LLM API
-- `/istatistik` - Presents security statistics for the last 7 days
-- `/yardim` - Displays the command help menu
+- `/threats` - Lists today's detected and blocked threat history
+- `/analyze` - Instantly triggers a manual deep analysis of server logs using the Groq LLM API
+- `/stats` - Presents security statistics for the last 7 days
+- `/help` - Displays the command help menu
 
 ## Customization
 
@@ -214,7 +214,7 @@ Bu depo, sunucu etkinliklerini izlemek, kötü niyetli girişimleri gerçek zama
 - `soc-rule-engine.py`: Saldırı kriterlerini ve bunlara verilecek otomatik tepkileri tanımlar.
 - `soc_config.py`: Tüm SOC bileşenleri için merkezi yapılandırma aracıdır.
 - `soc-auto-ban.py / soc-auto-unban.py`: IP adreslerini güvenli bir şekilde engelleme veya serbest bırakma mekanizmasıdır.
-- `soc-bot-listener.py`: Telegram Bot altyapısıdır. `/ban`, `/unban`, `/durum`, `/tehdit` vb. komutlarınızı çalıştırır.
+- `soc-bot-listener.py`: Telegram Bot altyapısıdır. `/ban`, `/unban`, `/status`, `/threats` vb. komutlarınızı çalıştırır.
 - `soc-notifier.py`: Tespit edilen tehditleri Telegram'a gönderir, onay/red butonlarını yönetir.
 - `soc-daily-report.py`: Günlük tehdit verilerini toparlar ve Telegram hesabınıza bir özet gönderir.
 - `soc-db-init.py`: Veritabanı tablolarını oluşturur ve başlatır.
@@ -228,14 +228,14 @@ Bu depo, sunucu etkinliklerini izlemek, kötü niyetli girişimleri gerçek zama
 Bot üzerinden kullanabileceğiniz komutlar şunlardır:
 
 - `/log <saat>` - Son X saatin Nginx, SSH ve UFW log özetini gösterir (Örn: `/log 2`)
-- `/durum` - Sistem CPU, RAM, disk kullanımı ve arka plan servislerinin güncel durumunu gösterir
+- `/status` - Sistem CPU, RAM, disk kullanımı ve arka plan servislerinin güncel durumunu gösterir
 - `/banlist` - Aktif engellenmiş (banlı) IP listesini ve son ban kayıtlarını listeler
 - `/ban <ip> <süre> <sebep>` - Belirtilen IP adresini kalıcı veya geçici (`1s`, `1g`, `7g`, `kalici`) olarak banlar (Örn: `/ban 1.2.3.4 7g brute_force`)
 - `/unban <ip>` - Nginx güvenlik duvarındaki bir IP yasaklamasını kaldırır
-- `/tehdit` - Bugün tespit edilen ve engellenen tehditlerin dökümünü listeler
-- `/analiz` - Groq LLM API ile sunucu loglarının manuel derin analizini anında başlatır
-- `/istatistik` - Son 7 günün güvenlik istatistiklerini (Kritik, Yüksek, Orta seviyeli tehditler vb.) sunar
-- `/yardim` - Komut yardım menüsünü görüntüler
+- `/threats` - Bugün tespit edilen ve engellenen tehditlerin dökümünü listeler
+- `/analyze` - Groq LLM API ile sunucu loglarının manuel derin analizini anında başlatır
+- `/stats` - Son 7 günün güvenlik istatistiklerini (Kritik, Yüksek, Orta seviyeli tehditler vb.) sunar
+- `/help` - Komut yardım menüsünü görüntüler
 
 ## Özelleştirme
 
